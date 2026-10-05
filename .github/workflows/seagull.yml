@@ -1,0 +1,103 @@
+---
+name: Seagull
+
+# Nightly: rebase the `seagull` patch set onto upstream master, test it, build
+# an amd64 image and publish it to ghcr.io/<owner>/searxng (seagull's
+# watchtower pulls it at 04:00 America/Phoenix = 11:00 UTC).
+#
+# The rebase only lives in this job's checkout; the `seagull` branch is never
+# pushed back (GITHUB_TOKEN cannot push upstream's workflow-file changes).
+# If the rebase conflicts or a test fails, nothing is published and the
+# instance stays on the last good image.
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 9 * * *"
+  push:
+    branches:
+      - seagull
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  PYTHON_VERSION: "3.14"
+  UPSTREAM: "https://github.com/searxng/searxng.git"
+
+jobs:
+  build:
+    if: github.repository_owner != 'searxng'
+    name: Rebase, test, build & publish
+    runs-on: ubuntu-26.04
+
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "${{ env.PYTHON_VERSION }}"
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: seagull
+          persist-credentials: "false"
+          fetch-depth: "0"
+
+      - name: Rebase onto upstream
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --no-tags "$UPSTREAM" master
+          base=$(git merge-base HEAD FETCH_HEAD)
+          echo "Patch set:"
+          git log --oneline "$base..HEAD"
+          if ! git rebase FETCH_HEAD; then
+            git rebase --abort
+            echo "::error::seagull patches no longer apply on upstream master; rebase locally and push"
+            exit 1
+          fi
+          echo "Upstream: $(git rev-parse --short FETCH_HEAD)  Build: $(git rev-parse --short HEAD)"
+
+      - name: Setup cache Python
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          key: "python-${{ env.PYTHON_VERSION }}-${{ runner.arch }}-${{ hashFiles('./requirements*.txt') }}"
+          restore-keys: |
+            python-${{ env.PYTHON_VERSION }}-${{ runner.arch }}-
+          path: "./local/"
+
+      - name: Unit tests
+        run: |
+          make V=1 install
+          make test.unit
+
+      - name: Build image
+        id: build
+        env:
+          OVERRIDE_ARCH: amd64
+        run: make container.build
+
+      - name: Smoke test image
+        env:
+          OVERRIDE_ARCH: amd64
+        run: make container.test
+
+      - name: Publish to GHCR
+        env:
+          DOCKER_TAG: "${{ steps.build.outputs.docker_tag }}"
+          REGISTRY_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/searxng"
+          echo "$REGISTRY_TOKEN" | podman login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          for tag in "$DOCKER_TAG" latest; do
+            podman tag "localhost/searxng/searxng:$DOCKER_TAG-amd64" "$image:$tag"
+            podman push "$image:$tag"
+          done
+          echo "Published $image:$DOCKER_TAG" >> "$GITHUB_STEP_SUMMARY"
