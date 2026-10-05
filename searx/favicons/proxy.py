@@ -230,6 +230,27 @@ def favicon_url(authority: str) -> str:
         data, mime = data_mime
         return f"data:{mime};base64,{str(base64.b64encode(data), 'utf-8')}"  # type: ignore
 
+    return _proxy_url(authority)
+
+
+def favicon_proxy_url(authority: str) -> str:
+    """Signed (relative) URL of the :py:obj:`favicon_proxy` for *authority*, as
+    used in the JSON output format.
+
+    Unlike :py:obj:`favicon_url` it never inlines a ``data:`` URL (that would
+    bloat API responses) and returns an empty string when favicons are disabled
+    or the resolver is already known to have no favicon for *authority*, so API
+    clients can fall back to their own placeholder.
+    """
+    resolver = sxng_request.preferences.get_value('favicon_resolver')  # type: ignore
+    if not authority or not resolver or resolver not in CFG.resolver_map.keys():
+        return ""
+    if cache.CACHE(resolver, authority) == (None, None):
+        return ""
+    return _proxy_url(authority)
+
+
+def _proxy_url(authority: str) -> str:
     h = new_hmac(CFG.secret_key, authority.encode())
     proxy_url = flask.url_for('favicon_proxy')
     query = urllib.parse.urlencode({"authority": authority, "h": h})

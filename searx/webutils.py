@@ -11,7 +11,7 @@ import re
 import itertools
 import json
 from datetime import datetime, timedelta
-from typing import Iterable, List, Tuple, TYPE_CHECKING
+from typing import Callable, Iterable, List, Tuple, TYPE_CHECKING
 
 from io import StringIO
 from codecs import getincrementalencoder
@@ -158,11 +158,29 @@ class JSONEncoder(json.JSONEncoder):  # pylint: disable=missing-class-docstring
         return super().default(o)
 
 
-def get_json_response(sq: "SearchQuery", rc: "ResultContainer") -> str:
-    """Returns the JSON string of the results to a query (``application/json``)"""
+def _result_dict(result, favicon_url_func: Callable[[str], str] | None) -> dict:
+    d = result.as_dict()
+    if favicon_url_func is None:
+        return d
+    parsed_url = d.get('parsed_url')
+    netloc = getattr(parsed_url, 'netloc', '')
+    favicon = favicon_url_func(netloc) if netloc else ''
+    if favicon:
+        d = {**d, 'favicon': favicon}  # copy: a LegacyResult's as_dict() is the result itself
+    return d
+
+
+def get_json_response(
+    sq: "SearchQuery", rc: "ResultContainer", favicon_url_func: Callable[[str], str] | None = None
+) -> str:
+    """Returns the JSON string of the results to a query (``application/json``)
+
+    If *favicon_url_func* is given, results get a ``favicon`` field with the
+    URL it returns for the result's netloc (omitted when it returns ``""``).
+    """
     data = {
         'query': sq.query,
-        'results': [_.as_dict() for _ in rc.get_ordered_results()],
+        'results': [_result_dict(_, favicon_url_func) for _ in rc.get_ordered_results()],
         'answers': [_.as_dict() for _ in rc.answers],
         'corrections': list(rc.corrections),
         'infoboxes': rc.infoboxes,
