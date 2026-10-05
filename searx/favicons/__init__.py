@@ -8,12 +8,12 @@ an example in which the command line is called in the development environment::
   (py3) python -m searx.favicons --help
 """
 
-__all__ = ["init", "favicon_url", "favicon_proxy"]
+__all__ = ["init", "favicon_url", "favicon_proxy_url", "favicon_proxy"]
 
 import pathlib
 from searx import logger
 from searx import get_setting
-from .proxy import favicon_url, favicon_proxy
+from .proxy import favicon_url, favicon_proxy_url, favicon_proxy
 
 logger = logger.getChild('favicons')
 

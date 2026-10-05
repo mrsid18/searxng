@@ -671,7 +671,7 @@ def search():
 
     if output_format == 'json':
 
-        response = webutils.get_json_response(search_query, result_container)
+        response = webutils.get_json_response(search_query, result_container, favicons.favicon_proxy_url)
         return Response(response, mimetype='application/json')
 
     if output_format == 'csv':

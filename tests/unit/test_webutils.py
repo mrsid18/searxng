@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # pylint: disable=missing-module-docstring,disable=missing-class-docstring,invalid-name
 
+import json
+
 import mock
 from parameterized.parameterized import parameterized
 from searx import webutils
+from searx.result_types import LegacyResult, MainResult
 from tests import SearxTestCase
 
 
@@ -112,3 +115,35 @@ class TestNewHmac(SearxTestCase):
         data = b'http://example.com'
         res = webutils.new_hmac('secret', data)
         self.assertEqual(res, '23e2baa2404012a5cc8e4a18b4aabf0dde4cb9b56f679ddc0fd6d7c24339d819')
+
+
+class TestJsonResponseFavicon(SearxTestCase):
+
+    def _json(self, results, favicon_url_func=None):
+        sq = mock.Mock(query='test')
+        rc = mock.Mock(answers=[], corrections=set(), infoboxes=[], suggestions=set(), unresponsive_engines=set())
+        rc.get_ordered_results.return_value = results
+        return json.loads(webutils.get_json_response(sq, rc, favicon_url_func))['results']
+
+    def _results(self):
+        main = MainResult(url='https://example.org/page', title='main')
+        main.normalize_result_fields()
+        legacy = LegacyResult(url='https://docs.example.com/x', title='legacy')
+        legacy.normalize_result_fields()
+        return main, legacy
+
+    def test_no_favicon_func(self):
+        for r in self._json(list(self._results())):
+            self.assertNotIn('favicon', r)
+
+    def test_favicon_field(self):
+        main, legacy = self._results()
+        results = self._json([main, legacy], lambda netloc: f'/favicon_proxy?authority={netloc}')
+        self.assertEqual(results[0]['favicon'], '/favicon_proxy?authority=example.org')
+        self.assertEqual(results[1]['favicon'], '/favicon_proxy?authority=docs.example.com')
+        # the LegacyResult (a dict) itself is not modified
+        self.assertNotIn('favicon', legacy)
+
+    def test_empty_favicon_is_omitted(self):
+        for r in self._json(list(self._results()), lambda netloc: ''):
+            self.assertNotIn('favicon', r)
