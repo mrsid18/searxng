@@ -117,7 +117,7 @@ Implementations
 
 """
 
-import json
+import re
 import typing as t
 from collections.abc import Callable
 from urllib.parse import urlencode
@@ -129,7 +129,7 @@ from searx.enginelib.traits import EngineTraits
 from searx.exceptions import SearxEngineResponseException
 from searx.result_types import EngineResults, MainResult, Video
 from searx.result_types.image import Image
-from searx.utils import html_to_text, js_obj_str_to_json_str, js_obj_str_to_python
+from searx.utils import html_to_text, js_obj_str_to_python
 
 if t.TYPE_CHECKING:
     from searx.extended_types import SXNG_Response
@@ -235,25 +235,189 @@ def _extract_published_date(published_date_raw: str | None):
         return None
 
 
+_JS_TOKEN_RE = re.compile(
+    r"""\s*(?:
+      (?P<str>"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')
+    | (?P<num>-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)
+    | (?P<iife>\(function\((?P<params>[\w$,]*)\)\{return\s*)
+    | (?P<void>void\s*\(?\s*0\s*\)?)
+    | (?P<ident>[A-Za-z_$][\w$]*)
+    | (?P<punct>[{}\[\]:,()])
+    )""",
+    re.X | re.S,
+)
+_JS_ESCAPE_RE = re.compile(r"\\(u\{[0-9a-fA-F]+\}|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|\r\n|.)", re.S)
+_JS_ESCAPES = {
+    "n": "\n",
+    "t": "\t",
+    "r": "\r",
+    "b": "\b",
+    "f": "\f",
+    "v": "\v",
+    "0": "\0",
+}
+_JS_CONSTANTS: dict[str, t.Any] = {
+    "true": True,
+    "false": False,
+    "null": None,
+    "undefined": None,
+}
+
+
+def _js_unescape(match: re.Match[str]) -> str:
+    esc = match.group(1)
+    if esc.startswith("u{"):
+        return chr(int(esc[2:-1], 16))
+    if esc[0] in "ux" and len(esc) > 1:
+        return chr(int(esc[1:], 16))
+    if esc in ("\n", "\r", "\r\n", "\u2028", "\u2029"):
+        return ""  # line continuation
+    return _JS_ESCAPES.get(esc, esc)
+
+
+def _js_string(literal: str) -> str:
+    value = _JS_ESCAPE_RE.sub(_js_unescape, literal[1:-1])
+    # \uXXXX escapes of non-BMP characters arrive as surrogate pairs
+    return value.encode("utf-16", "surrogatepass").decode("utf-16")
+
+
+class _JSRef(t.NamedTuple):
+    scope: object
+    name: str
+
+
+class _JSLiteralParser:  # pylint: disable=too-few-public-methods
+    """Parse the JS value literal SvelteKit embeds in Brave's result pages.
+
+    Supports objects, arrays, strings, numbers, ``true``/``false``/``null``/
+    ``undefined``/``void 0`` and devalue's deduplication wrapper::
+
+        (function(a,b){return {x:a,y:[a,b]}}("shared",42))
+
+    whose body references the parameters as bare identifiers.
+    """
+
+    def __init__(self, text: str, pos: int):
+        self.text = text
+        self.pos = pos
+        self.scopes: list[tuple[object, set[str]]] = []
+
+    def _token(self) -> re.Match[str]:
+        match = _JS_TOKEN_RE.match(self.text, self.pos)
+        if not match:
+            raise ValueError(f"unexpected JS at {self.pos}: {self.text[self.pos:self.pos + 40]!r}")
+        self.pos = match.end()
+        return match
+
+    def _expect(self, punct: str):
+        match = self._token()
+        if match.group("punct") != punct:
+            raise ValueError(f"expected {punct!r} at {match.start()}, got {match.group().strip()!r}")
+
+    def value(self) -> t.Any:
+        return self._value(self._token())
+
+    def _value(self, match: re.Match[str]) -> t.Any:  # pylint: disable=too-many-return-statements
+        if (tok := match.group("str")) is not None:
+            return _js_string(tok)
+        if (tok := match.group("num")) is not None:
+            return float(tok) if any(c in tok for c in ".eE") else int(tok)
+        if match.group("iife") is not None:
+            return self._iife(match.group("params"))
+        if match.group("void") is not None:
+            return None
+        if (tok := match.group("ident")) is not None:
+            if tok in _JS_CONSTANTS:
+                return _JS_CONSTANTS[tok]
+            for scope, params in reversed(self.scopes):
+                if tok in params:
+                    return _JSRef(scope, tok)
+            raise ValueError(f"unknown JS identifier {tok!r} at {match.start()}")
+        if match.group("punct") == "{":
+            return self._object()
+        if match.group("punct") == "[":
+            return self._array()
+        raise ValueError(f"unexpected JS token {match.group().strip()!r} at {match.start()}")
+
+    def _object(self) -> dict[str, t.Any]:
+        obj: dict[str, t.Any] = {}
+        while True:
+            match = self._token()
+            if match.group("punct") == "}":
+                return obj
+            if match.group("str") is not None:
+                key = _js_string(match.group("str"))
+            elif match.group("ident") is not None or match.group("num") is not None:
+                key = match.group().strip()
+            else:
+                raise ValueError(f"unexpected JS object key at {match.start()}")
+            self._expect(":")
+            obj[key] = self.value()
+            match = self._token()
+            if match.group("punct") == "}":
+                return obj
+            if match.group("punct") != ",":
+                raise ValueError(f"expected ',' or '}}' at {match.start()}")
+
+    def _array(self) -> list[t.Any]:
+        arr: list[t.Any] = []
+        while True:
+            match = self._token()
+            if match.group("punct") == "]":
+                return arr
+            arr.append(self._value(match))
+            match = self._token()
+            if match.group("punct") == "]":
+                return arr
+            if match.group("punct") != ",":
+                raise ValueError(f"expected ',' or ']' at {match.start()}")
+
+    def _iife(self, params_str: str) -> t.Any:
+        # (function(a,b){return BODY}(ARG_A,ARG_B))
+        params = [p for p in params_str.split(",") if p]
+        scope = object()
+        self.scopes.append((scope, set(params)))
+        body = self.value()
+        self.scopes.pop()
+        self._expect("}")
+        self._expect("(")
+        args: list[t.Any] = []
+        match = self._token()
+        while match.group("punct") != ")":
+            args.append(self._value(match))
+            match = self._token()
+            if match.group("punct") == ",":
+                match = self._token()
+        self._expect(")")
+        bindings = dict(zip(params, args + [None] * (len(params) - len(args))))
+        return self._resolve(body, scope, bindings)
+
+    def _resolve(self, obj: t.Any, scope: object, bindings: dict[str, t.Any]) -> t.Any:
+        if isinstance(obj, _JSRef):
+            return bindings[obj.name] if obj.scope is scope else obj
+        if isinstance(obj, dict):
+            return {k: self._resolve(v, scope, bindings) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [self._resolve(v, scope, bindings) for v in obj]
+        return obj
+
+
 def extract_json_data(text: str) -> dict[str, t.Any]:
     # Example script source containing the data:
     #
     # kit.start(app, element, {
     #    node_ids: [0, 19],
-    #    data: [{type:"data",data: .... ["q","goggles_id"],route:1,url:1}}]
-    #          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    #    data: [{type:"data",data: .... ["q","goggles_id"],route:1,url:1}}],
     #    form: null,
     #    error: null
     # });
-    start = text.index("data: [{")
-    newline = text.index("\n", start)
-    end = text.rindex("}}]", start, newline)
-    js_obj_str = "{" + text[start:end] + "}}]}"
-    # js_obj_str = js_obj_str.replace("\xa0", "")  # remove ASCII for &nbsp;
-    # js_obj_str = js_obj_str.replace(r"\u003C", "<").replace(r"\u003c", "<")  # fix broken HTML tags in strings
-    json_str = js_obj_str_to_json_str(js_obj_str)
-    data: dict[str, t.Any] = json.loads(json_str)
-    return data
+    #
+    # Since 2026-10 Brave wraps each entry in devalue's deduplication IIFE:
+    #
+    #    data: [(function(a,b){return {type:"data",data:{...}}}(...)), ...],
+    start = text.index("data: [", text.index("kit.start("))
+    data = _JSLiteralParser(text, start + len("data: ")).value()
+    return {"data": data}
 
 
 def response(resp: "SXNG_Response") -> EngineResults:
