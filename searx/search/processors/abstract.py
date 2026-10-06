@@ -253,6 +253,7 @@ class EngineProcessor(ABC):
            a corresponding filter
         - page number > 1 when engine does not support paging
         - page number > ``max_page``
+        - fewer words in the query than ``min_query_words`` (not for bangs)
 
         """
         # if paging is not supported, skip
@@ -262,6 +263,15 @@ class EngineProcessor(ABC):
         # if max page is reached, skip
         max_page = self.engine.max_page or get_setting("search.max_page")
         if max_page and max_page < search_query.pageno:
+            return None
+
+        # if the query is too short for the engine, skip; an engine selected
+        # by its bang (category "none") always runs
+        if (
+            self.engine.min_query_words
+            and engine_category != "none"
+            and len(search_query.query.split()) < self.engine.min_query_words
+        ):
             return None
 
         # if time_range is not supported, skip

@@ -35,6 +35,7 @@ ENGINE_DEFAULT_ARGS: dict[str, t.Any] = {
     "engine_type": "online",
     "paging": False,
     "max_page": 0,
+    "min_query_words": 0,
     "time_range_support": False,
     "safesearch": False,
     "language_support": False,

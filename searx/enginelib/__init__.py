@@ -251,6 +251,10 @@ class Engine(abc.ABC):  # pylint: disable=too-few-public-methods
     """If the engine supports paging, then this is the value for the last page
     that is still supported. ``0`` means unlimited numbers of pages."""
 
+    min_query_words: int = 0
+    """Skip the engine for queries with fewer words than this, unless it was
+    selected by its bang (``!shortcut``).  ``0`` means no minimum."""
+
     time_range_support: bool = False
     """Engine supports search time range."""
 
