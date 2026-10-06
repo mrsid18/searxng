@@ -10,6 +10,7 @@ usage::
 
 import typing as t
 
+import re
 import sys
 import copy
 import os
@@ -184,6 +185,20 @@ def set_loggers(engine: "Engine|types.ModuleType", engine_name: str):
             module.logger = logger.getChild(module_engine_name)  # type: ignore
 
 
+_ENV_REF = re.compile(r"^\$\{(\w+)\}$")
+
+
+def _expand_env(value: t.Any) -> t.Any:
+    """A string setting of the form ``${VAR}`` is replaced by the value of the
+    environment variable ``VAR`` (empty string if unset), so secrets like API
+    keys can live in the environment instead of ``settings.yml``."""
+    if isinstance(value, str):
+        m = _ENV_REF.match(value)
+        if m:
+            return os.environ.get(m.group(1), "")
+    return value
+
+
 def update_engine_attributes(engine: "Engine | types.ModuleType", engine_data: dict[str, t.Any]):
     # pylint: disable=too-many-branches
 
@@ -222,7 +237,7 @@ def update_engine_attributes(engine: "Engine | types.ModuleType", engine_data: d
                 param_value = list(map(str.strip, param_value.split(',')))
             engine.categories = param_value  # type: ignore
         else:
-            setattr(engine, param_name, param_value)
+            setattr(engine, param_name, _expand_env(param_value))
 
     # set default attributes
     for arg_name, arg_value in ENGINE_DEFAULT_ARGS.items():
