@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # pylint: disable=missing-module-docstring,disable=missing-class-docstring,invalid-name
 
+from unittest import mock
+
 from searx import settings, engines
 from tests import SearxTestCase
 
@@ -17,6 +19,19 @@ class TestEnginesInit(SearxTestCase):
         self.assertEqual(len(engines.engines), 2)
         self.assertIn('engine1', engines.engines)
         self.assertIn('engine2', engines.engines)
+
+    @mock.patch.dict('os.environ', {'TEST_ENGINE_KEY': 's3cret'})
+    def test_initialize_engines_env_reference(self):
+        engine_list = [
+            {'engine': 'dummy', 'name': 'engine1', 'shortcut': 'e1', 'api_key': '${TEST_ENGINE_KEY}'},
+            {'engine': 'dummy', 'name': 'engine2', 'shortcut': 'e2', 'api_key': '${TEST_ENGINE_UNSET}'},
+            {'engine': 'dummy', 'name': 'engine3', 'shortcut': 'e3', 'api_key': 'x${TEST_ENGINE_KEY}'},
+        ]
+
+        engines.load_engines(engine_list)
+        self.assertEqual(engines.engines['engine1'].api_key, 's3cret')
+        self.assertEqual(engines.engines['engine2'].api_key, '')
+        self.assertEqual(engines.engines['engine3'].api_key, 'x${TEST_ENGINE_KEY}')
 
     def test_initialize_engines_exclude_onions(self):
         settings['outgoing']['using_tor_proxy'] = False
