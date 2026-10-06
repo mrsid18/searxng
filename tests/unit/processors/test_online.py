@@ -36,3 +36,20 @@ class TestOnlineProcessor(SearxTestCase):
         search_query = SearchQuery('test', [EngineRef(TEST_ENGINE_NAME, 'general')], 'all', 0, 1, None, None, None)
         params = self._get_params(online_processor, search_query, 'general')
         self.assertNotIn('User-Agent', params['headers'])
+
+    def test_get_params_min_query_words(self):
+        engine = engines.engines[TEST_ENGINE_NAME]
+        online_processor = online.OnlineProcessor(engine)
+        engine.min_query_words = 3
+        try:
+
+            def query(q, category):
+                sq = SearchQuery(q, [EngineRef(TEST_ENGINE_NAME, category)], 'all', 0, 1, None, None, None)
+                return online_processor.get_params(sq, category)
+
+            self.assertIsNone(query('two words', 'general'))
+            self.assertIsNotNone(query('three whole words', 'general'))
+            # selected by its bang
+            self.assertIsNotNone(query('two words', 'none'))
+        finally:
+            engine.min_query_words = 0
